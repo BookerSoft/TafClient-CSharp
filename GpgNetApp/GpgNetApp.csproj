@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>GpgNetApp</RootNamespace>
+    <AssemblyName>gpgnet4ta</AssemblyName>
+    <!-- Self-contained single-file publish so gpgnet4ta never depends on a
+         system-wide dotnet runtime being installed — TafClient itself is
+         published self-contained, and gpgnet4ta (launched from inside it via
+         GameLaunchService) needs the exact same guarantee. Without this, a
+         machine with no dotnet SDK/runtime at all (the normal case for a
+         self-contained TafClient deployment) can never run gpgnet4ta via
+         `dotnet exec`, since there's no `dotnet` to exec it with. -->
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../GpgNet.Protocol/GpgNet.Protocol.csproj" />
+    <ProjectReference Include="../GpgNet.Client/GpgNet.Client.csproj" />
+    <ProjectReference Include="../TaLaunch/TaLaunch.csproj" />
+    <ProjectReference Include="../TafToolbox.Hpi/TafToolbox.Hpi.csproj" />
+    <ProjectReference Include="../TafToolbox.Crc32/TafToolbox.Crc32.csproj" />
+    <ProjectReference Include="../MapTool/MapTool.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging"              Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console"      Version="10.0.0" />
+  </ItemGroup>
+</Project>

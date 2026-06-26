@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>maptool</AssemblyName>
+    <RootNamespace>TafToolbox.MapTool</RootNamespace>
+    <RuntimeIdentifiers>win-x64;win-arm64;osx-x64;osx-arm64;linux-x64;linux-arm64</RuntimeIdentifiers>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TafToolbox.Hpi/TafToolbox.Hpi.csproj" />
+    <ProjectReference Include="../TafToolbox.Crc32/TafToolbox.Crc32.csproj" />
+  </ItemGroup>
+</Project>

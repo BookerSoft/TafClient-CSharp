@@ -1,0 +1,245 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>TafClient</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Platforms>x64;arm64</Platforms>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- GpgNet C# projects — built from same solution, replaces native gpgnet4ta binary -->
+    <ProjectReference Include="../GpgNet.Protocol/GpgNet.Protocol.csproj" />
+    <ProjectReference Include="../GpgNet.Client/GpgNet.Client.csproj" />
+    <!-- GpgNetApp builds gpgnet4ta.dll — a separate Exe, but we run it via
+         `dotnet exec` from GameLaunchService, so its output must land in our
+         own output directory. CopyLocalLockFileAssemblies + ReferenceOutputAssembly
+         ensures MSBuild copies gpgnet4ta.dll (and its dependency closure) here on build,
+         even though it's normally not copy-local for an exe→exe ProjectReference. -->
+    <ProjectReference Include="../GpgNetApp/GpgNetApp.csproj" ReferenceOutputAssembly="false" />
+    <!-- TaLaunch — talauncher TCP client protocol port -->
+    <ProjectReference Include="../TaLaunch/TaLaunch.csproj" />
+    <!-- TafToolbox — HPI archive, CRC32, map tool, compare assets -->
+    <ProjectReference Include="../TafToolbox.Crc32/TafToolbox.Crc32.csproj" />
+    <ProjectReference Include="../TafToolbox.Hpi/TafToolbox.Hpi.csproj" />
+    <ProjectReference Include="../CompareAssets/CompareAssets.csproj" />
+    <ProjectReference Include="../MapTool/MapTool.csproj" />
+  </ItemGroup>
+
+  <!-- Copy the built gpgnet4ta.dll (and its runtimeconfig/deps.json) into our own
+       output directory after GpgNetApp builds, so it's a sibling of TafClient.dll
+       at runtime and FindGpgNet4TaExe() in GameLaunchService can locate it.
+       Hooked to BOTH Build and Publish — `dotnet publish` runs its own separate
+       pipeline into $(PublishDir), which is NOT the same as $(OutDir) and does
+       NOT automatically pick up files only copied during Build. Without the
+       Publish hook, a published/self-contained build (e.g. win-x64 publish)
+       never gets gpgnet4ta.dll at all, which is exactly what was happening. -->
+  <Target Name="CopyGpgNetAppOutputAfterBuild" AfterTargets="Build">
+    <ItemGroup>
+      <GpgNetAppFilesBuild Include="..\GpgNetApp\bin\$(Configuration)\$(TargetFramework)\gpgnet4ta.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(GpgNetAppFilesBuild)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- Publish GpgNetApp as a self-contained single-file exe for the SAME runtime
+       identifier as this (TafClient) publish, then copy the result alongside
+       TafClient's own publish output. This guarantees gpgnet4ta.exe never needs
+       a system-wide dotnet install — it carries its own runtime, exactly like
+       a self-contained TafClient publish does for itself. Only runs when
+       $(RuntimeIdentifier) is set (i.e. this IS a self-contained/RID-specific
+       publish) — for a framework-dependent publish, the old dotnet-exec path
+       via gpgnet4ta.dll still works fine, since a dotnet runtime is implied
+       by framework-dependent deployment anyway.
+
+       IMPORTANT: this nested `dotnet publish` runs from inside an MSBuild
+       target that is itself part of an outer `dotnet publish` invocation for
+       TafClient. That can hit lock/process conflicts on some machines (NuGet
+       cache, build lock files) and fail silently if errors are swallowed —
+       which is exactly what happened when this previously used
+       ContinueOnError="WarnAndContinue" with no fallback: the nested publish
+       failed, nothing got copied, and gpgnet4ta.dll wasn't there as a
+       fallback either since that copy only ran for framework-dependent
+       publishes. Fixed by: (1) specifying the target framework explicitly so
+       there's no ambiguity for the nested build to fail on, (2) letting a
+       real failure surface as a build error instead of a silently-swallowed
+       warning, since a half-finished gpgnet4ta is worse than a loud failure,
+       and (3) always ALSO copying the plain build-output .dll as a fallback,
+       so even if the self-contained publish step is skipped or produces
+       nothing usable, gpgnet4ta.dll is still present for the dotnet-exec path. -->
+  <Target Name="PublishGpgNetAppSelfContained" AfterTargets="Publish" Condition="'$(RuntimeIdentifier)' != ''">
+    <Exec Command="dotnet publish &quot;$(MSBuildThisFileDirectory)../GpgNetApp/GpgNetApp.csproj&quot; -c $(Configuration) -f $(TargetFramework) -r $(RuntimeIdentifier) --self-contained true -p:PublishSingleFile=true"
+          ContinueOnError="WarnAndContinue" />
+    <ItemGroup>
+      <GpgNetAppSelfContainedExe Include="..\GpgNetApp\bin\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\gpgnet4ta.exe" Condition="$(RuntimeIdentifier.StartsWith('win'))" />
+      <GpgNetAppSelfContainedExeUnix Include="..\GpgNetApp\bin\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\gpgnet4ta" Condition="!$(RuntimeIdentifier.StartsWith('win'))" />
+      <!-- Always-available fallback: the plain build-output managed .dll,
+           runnable via `dotnet exec` even on a self-contained TafClient
+           publish, AS LONG AS the target machine happens to have a dotnet
+           runtime too. Not a perfect fallback (defeats the point of
+           self-contained), but strictly better than gpgnet4ta being
+           completely absent if the nested self-contained publish failed. -->
+      <GpgNetAppFallbackDll Include="..\GpgNetApp\bin\$(Configuration)\$(TargetFramework)\gpgnet4ta.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(GpgNetAppSelfContainedExe)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="'@(GpgNetAppSelfContainedExe)' != '' AND Exists('%(GpgNetAppSelfContainedExe.FullPath)')" />
+    <Copy SourceFiles="@(GpgNetAppSelfContainedExeUnix)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="'@(GpgNetAppSelfContainedExeUnix)' != '' AND Exists('%(GpgNetAppSelfContainedExeUnix.FullPath)')" />
+    <!-- FIXED: this used to always check for gpgnet4ta.exe regardless of
+         platform, which meant on macOS/Linux (where the real self-contained
+         binary is named "gpgnet4ta" with no extension) this condition was
+         ALWAYS true — gpgnet4ta.exe never exists there regardless of
+         whether the correct binary was successfully produced — so the
+         broken dotnet-exec-dependent .dll fallback was unconditionally
+         copied on every non-Windows build, defeating the entire point of
+         the self-contained publish. Now checks for whichever name is
+         actually correct for $(RuntimeIdentifier). -->
+    <PropertyGroup>
+      <GpgNetAppExpectedSelfContainedName Condition="$(RuntimeIdentifier.StartsWith('win'))">gpgnet4ta.exe</GpgNetAppExpectedSelfContainedName>
+      <GpgNetAppExpectedSelfContainedName Condition="!$(RuntimeIdentifier.StartsWith('win'))">gpgnet4ta</GpgNetAppExpectedSelfContainedName>
+    </PropertyGroup>
+    <Copy SourceFiles="@(GpgNetAppFallbackDll)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="'@(GpgNetAppFallbackDll)' != '' AND Exists('%(GpgNetAppFallbackDll.FullPath)') AND !Exists('$(PublishDir)$(GpgNetAppExpectedSelfContainedName)')" />
+    <Warning Text="gpgnet4ta could not be found anywhere after attempting both self-contained publish and the plain-dll fallback — game hosting/joining will fail. Check the 'dotnet publish' output above for the real error."
+             Condition="!Exists('$(PublishDir)$(GpgNetAppExpectedSelfContainedName)') AND !Exists('$(PublishDir)gpgnet4ta.dll')" />
+  </Target>
+
+  <!-- Always-run fallback: copy the plain managed gpgnet4ta.dll into the
+       publish output regardless of whether this is a framework-dependent or
+       self-contained/RID-specific publish. For framework-dependent publishes
+       this is the primary mechanism (run via `dotnet exec`); for
+       self-contained publishes it's a last-resort safety net in case
+       PublishGpgNetAppSelfContained's nested publish failed for any reason —
+       better to have a fallback .dll requiring a system dotnet than nothing
+       at all. -->
+  <Target Name="CopyGpgNetAppOutputAfterPublish" AfterTargets="Publish;PublishGpgNetAppSelfContained">
+    <ItemGroup>
+      <GpgNetAppFilesPublishPlain Include="..\GpgNetApp\bin\$(Configuration)\$(TargetFramework)\gpgnet4ta.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(GpgNetAppFilesPublishPlain)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="'@(GpgNetAppFilesPublishPlain)' != ''" />
+  </Target>
+  <ItemGroup>
+    <!-- GUI: TGUI.Net targets .NET Standard 2.1, fully compatible with net10.0 -->
+    <PackageReference Include="TGUI.Net"                                    Version="1.12.0" />
+
+    <!-- DI / Hosting — latest stable for .NET 10 -->
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection"    Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting"                Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json"     Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Http"                       Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions"   Version="10.0.0" />
+
+    <!-- Logging sinks -->
+    <PackageReference Include="Serilog.Extensions.Hosting"                  Version="9.0.0" />
+    <PackageReference Include="Serilog.Sinks.File"                          Version="6.0.0" />
+    <PackageReference Include="Serilog.Sinks.Console"                       Version="6.0.0" />
+
+    <!-- Reactive -->
+    <PackageReference Include="System.Reactive"                             Version="6.0.1" />
+    <PackageReference Include="Microsoft.Data.Sqlite"                       Version="9.0.0" />
+
+    <!-- MVVM (domain model ObservableObject) -->
+    <PackageReference Include="CommunityToolkit.Mvvm"                       Version="8.4.0" />
+  </ItemGroup>
+
+  <!-- ── Native dependencies: faf-ice-adapter, gpgnet4ta, talauncher, support DLLs ── -->
+  <!-- Copied to output directory on every build so they're alongside the executable.  -->
+  <ItemGroup>
+    <Content Include="natives\faf-ice-adapter.jar">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\faf-uid">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\Qt5Core.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\Qt5Network.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\compare_assets">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\compare_assets.exe">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\cryptopp.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\gpgnet4ta">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\libbz2.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\libcrypto-1_1.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\libfreetype-6.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\libgcc_s_sjlj-1.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\libglib-2.0-0.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\libharfbuzz-0.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\libiconv-2.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\libintl-8.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\libpcre-1.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\libpcre2-16-0.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\libpng16-16.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\libssl-1_1.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\libstdc++-6.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\libwinpthread-1.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\libzstd.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\maptool">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\online.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\replayer.exe">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\replayserver">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\replayserver.exe">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\taforever.ini.template">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\talauncher.exe">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\testapp">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\testapp.exe">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="natives\bin\zlib1.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+</Project>
